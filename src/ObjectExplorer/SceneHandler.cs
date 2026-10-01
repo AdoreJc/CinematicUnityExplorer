@@ -1,4 +1,5 @@
 ﻿using UnityEngine.SceneManagement;
+using UnityExplorer.Runtime;
 
 namespace UnityExplorer.ObjectExplorer
 {
@@ -38,7 +39,7 @@ namespace UnityExplorer.ObjectExplorer
         internal static int DefaultSceneCount => 1 + (DontDestroyExists ? 1 : 0);
 
         /// <summary>Whether or not we are currently inspecting the "HideAndDontSave" asset scene.</summary>
-        public static bool InspectingAssetScene => SelectedScene.HasValue && SelectedScene.Value.handle == -1;
+        public static bool InspectingAssetScene => SelectedScene.HasValue && SceneCompat.GetIntHandle(SelectedScene.Value) == -1;
 
         /// <summary>Whether or not we successfuly retrieved the names of the scenes in the build settings.</summary>
         public static bool WasAbleToGetScenesInBuild { get; private set; }
@@ -46,10 +47,55 @@ namespace UnityExplorer.ObjectExplorer
         /// <summary>Whether or not the "DontDestroyOnLoad" scene exists in this game.</summary>
         public static bool DontDestroyExists { get; private set; }
 
+        private const string DONT_DESTROY_NAME = "DontDestroyOnLoad";
+
         internal static void Init()
         {
-            // Check if the game has "DontDestroyOnLoad"
-            DontDestroyExists = Scene.GetNameInternal(-12) == "DontDestroyOnLoad";
+            // Check if the game has "DontDestroyOnLoad".
+            // Scene.GetNameInternal's signature changed in Unity 6000.3+ (int -> SceneHandle),
+            // so SceneCompat converts the argument reflectively to support both.
+            DontDestroyExists = SceneCompat.GetNameOfHandle(-12) == DONT_DESTROY_NAME;
+
+            // Fallback 1: enumerate the SceneManager's scene list by name.
+            if (!DontDestroyExists)
+            {
+                try
+                {
+                    for (int i = 0; i < SceneManager.sceneCount; i++)
+                    {
+                        if (SceneManager.GetSceneAt(i).name == DONT_DESTROY_NAME)
+                        {
+                            DontDestroyExists = true;
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ExplorerCore.LogWarning($"Unable to check DontDestroyOnLoad via SceneManager: {ex.Message}");
+                }
+            }
+
+            // Fallback 2 (last resort, expensive): find a loaded GameObject living in the DontDestroyOnLoad scene.
+            if (!DontDestroyExists)
+            {
+                try
+                {
+                    foreach (UnityEngine.Object obj in RuntimeHelper.FindObjectsOfTypeAll(typeof(GameObject)))
+                    {
+                        GameObject go = obj.TryCast<GameObject>();
+                        if (go && go.transform != null && go.scene.IsValid() && go.scene.name == DONT_DESTROY_NAME)
+                        {
+                            DontDestroyExists = true;
+                            break;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ExplorerCore.LogWarning($"Unable to check DontDestroyOnLoad via GameObjects: {ex.Message}");
+                }
+            }
 
             // Try to get all scenes in the build settings. This may not work.
             try
@@ -80,16 +126,20 @@ namespace UnityExplorer.ObjectExplorer
             // Inspected scene will exist if it's DontDestroyOnLoad or HideAndDontSave
             bool inspectedExists =
                 SelectedScene.HasValue
-                && ((DontDestroyExists && SelectedScene.Value.handle == -12)
-                    || SelectedScene.Value.handle == -1);
+                && ((DontDestroyExists && SceneCompat.GetIntHandle(SelectedScene.Value) == -12)
+                    || SceneCompat.GetIntHandle(SelectedScene.Value) == -1);
 
             LoadedScenes.Clear();
+            bool realDontDestroyLoaded = false;
 
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
                 Scene scene = SceneManager.GetSceneAt(i);
                 if (scene == default || !scene.isLoaded || !scene.IsValid())
                     continue;
+
+                if (scene.name == DONT_DESTROY_NAME)
+                    realDontDestroyLoaded = true;
 
                 // If we have not yet confirmed inspectedExists, check if this scene is our currently inspected one.
                 if (!inspectedExists && scene == SelectedScene)
@@ -98,9 +148,24 @@ namespace UnityExplorer.ObjectExplorer
                 LoadedScenes.Add(scene);
             }
 
-            if (DontDestroyExists)
-                LoadedScenes.Add(new Scene { m_Handle = -12 });
-            LoadedScenes.Add(new Scene { m_Handle = -1 });
+            // If the real DontDestroyOnLoad scene was enumerated, remap a selected synthetic placeholder
+            // (older engines return DontDestroyOnLoad only as a placeholder; Unity 6000.3+ may enumerate it).
+            // Membership check instead of name lookup: a synthetic scene's name is not trustworthy on every engine.
+            if (realDontDestroyLoaded && DontDestroyExists
+                && SelectedScene.HasValue
+                && !LoadedScenes.Contains(SelectedScene.Value)
+                && SceneCompat.GetIntHandle(SelectedScene.Value) == -12)
+            {
+                Scene realDontDestroy = LoadedScenes.First(s => s.name == DONT_DESTROY_NAME);
+                SelectedScene = realDontDestroy;
+                inspectedExists = true;
+            }
+
+            // Only add a synthetic DontDestroyOnLoad placeholder if the real one wasn't enumerated
+            // (older Unity engines don't return it from SceneManager.GetSceneAt; Unity 6000.3+ may).
+            if (DontDestroyExists && !realDontDestroyLoaded)
+                LoadedScenes.Add(SceneCompat.CreatePlaceholderScene(-12));
+            LoadedScenes.Add(SceneCompat.CreatePlaceholderScene(-1));
 
             // Default to first scene if none selected or previous selection no longer exists.
             if (!inspectedExists)

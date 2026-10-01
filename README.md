@@ -11,7 +11,7 @@
   To see the forks features I have worked on so far check out the <a href="#features">Features</a> section.
 </p>
 <p align="center">
-  ✔️ Supports most Unity versions from 5.2 to 2021+ (IL2CPP and Mono).
+  ✔️ Supports most Unity versions from 5.2 to Unity 6 (6000.x) (IL2CPP and Mono).
 </p>
 <p align="center">
   ✨ Powered by <a href="https://github.com/yukieiji/UniverseLib">UniverseLib</a>
